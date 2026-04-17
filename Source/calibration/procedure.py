@@ -490,64 +490,89 @@ DEFAULT_RISE_WINDOW_S = 0.1
 DEFAULT_RISE_PRE_FLIP_S = 0.02
 
 
+# Minimum duration the trace must remain past a 10/90 threshold for a
+# crossing to count. Filters sub-millisecond spikes (scan-line
+# artifacts, brief OLED refresh glitches) that would otherwise trigger
+# a false early 10% crossing and dominate the reported transition
+# duration. 1 ms safely exceeds any single-sample transient while
+# staying far below typical monitor rise/fall times (tens of us on
+# OLED, single ms on LCD).
+DEFAULT_RISE_SUSTAIN_S = 0.001
+
+
 @dataclass(frozen=True)
 class RiseTimeResult:
-    """Per-channel 10-90% rise and fall times for the black<->white transition.
+    """Per-channel transition timings for black<->white flips at each PD.
 
-    Traces are retained so the caller can plot them for sanity check
-    (shape tells you whether the monitor is OLED-fast, LCD-slow with
-    overshoot, LCD-slow with long tail, etc.).
+    `*_duration_s` is the 10-90% transition time itself -- how long the
+    PD spends ramping between states. Bounded below by the monitor's
+    actual pixel response; a sensible metric for "how blurry is a bit
+    flip at a sampling DAQ."
+
+    `*_latency_s` is the time from the start of the capture window
+    (which begins the moment the DAQ task starts) to the sustained 10%
+    crossing. This folds in (a) the pre-flip delay, (b) pygame.flip()
+    overhead, (c) the monitor's frame pipeline. On a 60 Hz display it's
+    typically quantized to multiples of 16.7 ms. The difference between
+    rise_latency and fall_latency is a useful asymmetry diagnostic.
+
+    Traces are retained so the caller can plot them for sanity check.
     """
 
     channels: tuple[str, ...]
-    rise_time_s: np.ndarray
-    fall_time_s: np.ndarray
+    rise_duration_s: np.ndarray
+    fall_duration_s: np.ndarray
+    rise_latency_s: np.ndarray
+    fall_latency_s: np.ndarray
     sample_rate: float
     pre_flip_s: float
+    sustain_s: float
     rise_trace: np.ndarray  # (n_channels, n_samples) volts
     fall_trace: np.ndarray
 
 
-def _transition_10_90(trace: np.ndarray, sample_rate: float) -> float:
-    """Return 10-90% (or 90-10%) transition time in seconds, or NaN.
+def _first_sustained_crossing(mask: np.ndarray, n_sustain: int) -> int:
+    """Return the first index i where mask[i : i+n_sustain] is all True, else -1.
 
-    Works for both rising and falling edges by normalizing the trace to
-    [0, 1] via (trace - baseline) / (plateau - baseline); thresholds are
-    always 0.1 and 0.9 on that scale, in that order.
+    Vectorized via a cumulative-sum window count: counts[i] is the number
+    of True values in mask[i : i+n_sustain]; the earliest i where that
+    equals n_sustain is our sustained-crossing index.
+    """
+    if n_sustain <= 1:
+        return int(np.argmax(mask)) if mask.any() else -1
+    int_mask = mask.astype(np.int64)
+    csum = np.concatenate(([0], np.cumsum(int_mask)))
+    counts = csum[n_sustain:] - csum[:-n_sustain]
+    valid = np.where(counts == n_sustain)[0]
+    return int(valid[0]) if valid.size > 0 else -1
+
+
+def _detect_transition(
+    trace: np.ndarray, sample_rate: float, sustain_s: float,
+) -> tuple[float, float]:
+    """Return (latency_s, duration_10_90_s) for a trace with one transition.
+
+    Normalizes trace to [0, 1] on (baseline mean, plateau mean) so the
+    same code handles rise and fall; looks for the first sustained 10%
+    and 90% crossings (sub-frame spikes that drop below the threshold
+    within sustain_s are rejected).
     """
     n = trace.size
-    n_pre = max(20, n // 20)   # first 5% -> baseline
-    n_post = max(20, n // 10)  # last 10% -> plateau
+    n_pre = max(20, n // 20)    # first 5% -> baseline
+    n_post = max(20, n // 10)   # last 10% -> plateau
     baseline = float(trace[:n_pre].mean())
     plateau = float(trace[-n_post:].mean())
     span = plateau - baseline
     if abs(span) < 0.01:  # <10 mV -- no real transition captured
-        return float("nan")
+        return float("nan"), float("nan")
 
-    norm = (trace - baseline) / span  # goes 0 -> 1 for both rise and fall
-    # First sample crossing each threshold. argmax on a bool array gives
-    # the first True index, or 0 if none are True; check via the value.
-    crossed_10 = norm >= 0.1
-    crossed_90 = norm >= 0.9
-    if not crossed_10.any() or not crossed_90.any():
-        return float("nan")
-    i10 = int(np.argmax(crossed_10))
-    i90 = int(np.argmax(crossed_90))
-    if i90 <= i10:
-        return float("nan")
-
-    def interp(idx: int, threshold: float) -> float:
-        """Linear interpolate the sample index where norm crosses threshold."""
-        if idx == 0:
-            return 0.0
-        y0, y1 = norm[idx - 1], norm[idx]
-        if y1 == y0:
-            return float(idx)
-        return (idx - 1) + (threshold - y0) / (y1 - y0)
-
-    t10 = interp(i10, 0.1) / sample_rate
-    t90 = interp(i90, 0.9) / sample_rate
-    return t90 - t10
+    norm = (trace - baseline) / span  # 0 at baseline, 1 at plateau
+    sustain_n = max(1, int(round(sustain_s * sample_rate)))
+    i10 = _first_sustained_crossing(norm >= 0.1, sustain_n)
+    i90 = _first_sustained_crossing(norm >= 0.9, sustain_n)
+    if i10 < 0 or i90 < 0 or i90 <= i10:
+        return float("nan"), float("nan")
+    return i10 / sample_rate, (i90 - i10) / sample_rate
 
 
 def measure_rise_times(
@@ -560,6 +585,7 @@ def measure_rise_times(
     pre_flip_s: float = DEFAULT_RISE_PRE_FLIP_S,
     sample_rate: float = DEFAULT_RISE_SAMPLE_RATE,
     settle_time: float = DEFAULT_SETTLE_TIME_S,
+    sustain_s: float = DEFAULT_RISE_SUSTAIN_S,
 ) -> RiseTimeResult:
     """Measure 10-90% rise and fall time at each PD's fine position.
 
@@ -578,8 +604,10 @@ def measure_rise_times(
     import time as _time  # local import: not used by the module elsewhere
 
     n_chan = len(fine.channels)
-    rise_times = np.full(n_chan, np.nan)
-    fall_times = np.full(n_chan, np.nan)
+    rise_durations = np.full(n_chan, np.nan)
+    fall_durations = np.full(n_chan, np.nan)
+    rise_latencies = np.full(n_chan, np.nan)
+    fall_latencies = np.full(n_chan, np.nan)
     n_samples = int(round(duration * sample_rate))
     rise_traces = np.zeros((n_chan, n_samples), dtype=np.float64)
     fall_traces = np.zeros((n_chan, n_samples), dtype=np.float64)
@@ -608,7 +636,9 @@ def measure_rise_times(
         trace = acq.samples[0]
         n_eff = min(trace.size, n_samples)
         rise_traces[i, :n_eff] = trace[:n_eff]
-        rise_times[i] = _transition_10_90(trace, sample_rate)
+        rise_latencies[i], rise_durations[i] = _detect_transition(
+            trace, sample_rate, sustain_s,
+        )
 
         # --- Fall: white disk on black, flip to all-black. ---
         display.circle(cx, cy, radius)
@@ -627,17 +657,22 @@ def measure_rise_times(
         trace = acq.samples[0]
         n_eff = min(trace.size, n_samples)
         fall_traces[i, :n_eff] = trace[:n_eff]
-        fall_times[i] = _transition_10_90(trace, sample_rate)
+        fall_latencies[i], fall_durations[i] = _detect_transition(
+            trace, sample_rate, sustain_s,
+        )
 
     display.black()
     display.flip()
 
     return RiseTimeResult(
         channels=fine.channels,
-        rise_time_s=rise_times,
-        fall_time_s=fall_times,
+        rise_duration_s=rise_durations,
+        fall_duration_s=fall_durations,
+        rise_latency_s=rise_latencies,
+        fall_latency_s=fall_latencies,
         sample_rate=sample_rate,
         pre_flip_s=pre_flip_s,
+        sustain_s=sustain_s,
         rise_trace=rise_traces,
         fall_trace=fall_traces,
     )

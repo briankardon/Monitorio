@@ -116,16 +116,22 @@ def main() -> int:
                 sample_rate=args.rise_rate,
             )
 
-            # Terminal report.
-            print("\nResults:")
-            hdr = f"  {'channel':<12}{'rise (ms)':>12}{'fall (ms)':>12}"
+            # Terminal report: duration (10-90%) and latency (start -> 10%).
+            print("\nResults (ms):")
+            hdr = (
+                f"  {'channel':<12}"
+                f"{'rise dur':>10}{'rise lat':>10}"
+                f"{'fall dur':>10}{'fall lat':>10}"
+            )
             print(hdr)
             print("  " + "-" * (len(hdr) - 2))
             for i, c in enumerate(rt.channels):
                 print(
                     f"  {c:<12}"
-                    f"{rt.rise_time_s[i]*1000:>12.3f}"
-                    f"{rt.fall_time_s[i]*1000:>12.3f}"
+                    f"{rt.rise_duration_s[i]*1000:>10.3f}"
+                    f"{rt.rise_latency_s[i]*1000:>10.2f}"
+                    f"{rt.fall_duration_s[i]*1000:>10.3f}"
+                    f"{rt.fall_latency_s[i]*1000:>10.2f}"
                 )
 
             # Save traces for external plotting if requested.
@@ -137,10 +143,13 @@ def main() -> int:
             np.savez(
                 out_path,
                 channels=np.array(rt.channels),
-                rise_time_s=rt.rise_time_s,
-                fall_time_s=rt.fall_time_s,
+                rise_duration_s=rt.rise_duration_s,
+                fall_duration_s=rt.fall_duration_s,
+                rise_latency_s=rt.rise_latency_s,
+                fall_latency_s=rt.fall_latency_s,
                 sample_rate=rt.sample_rate,
                 pre_flip_s=rt.pre_flip_s,
+                sustain_s=rt.sustain_s,
                 rise_trace=rt.rise_trace,
                 fall_trace=rt.fall_trace,
             )
@@ -148,14 +157,17 @@ def main() -> int:
 
             # On-screen summary.
             lines = ["Rise-time measurement complete", ""]
-            lines.append(f"{'channel':<10}{'rise (ms)':>12}{'fall (ms)':>12}")
+            lines.append(f"{'ch':<8}{'r_dur':>10}{'r_lat':>10}{'f_dur':>10}{'f_lat':>10}")
             for i, c in enumerate(rt.channels):
                 short = c.split("/")[-1]
                 lines.append(
-                    f"{short:<10}"
-                    f"{rt.rise_time_s[i]*1000:>12.3f}"
-                    f"{rt.fall_time_s[i]*1000:>12.3f}"
+                    f"{short:<8}"
+                    f"{rt.rise_duration_s[i]*1000:>10.2f}"
+                    f"{rt.rise_latency_s[i]*1000:>10.1f}"
+                    f"{rt.fall_duration_s[i]*1000:>10.2f}"
+                    f"{rt.fall_latency_s[i]*1000:>10.1f}"
                 )
+            lines.append("(all values in ms)")
             lines += ["", f"Traces: {out_path.name}", "", "Press any key to exit."]
             display.message("\n".join(lines), size=max(20, display.height // 32))
             display.flip()
