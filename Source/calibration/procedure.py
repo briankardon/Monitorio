@@ -471,3 +471,173 @@ def refine_locations(
         x_fwhm_px=x_fwhm,
         y_fwhm_px=y_fwhm,
     )
+
+
+# High-rate single-channel default for rise-time measurements. Single
+# channel sidesteps the multiplexer, so we can run near the card's
+# single-channel max without any ghost worry. 50 kHz gives 20 us
+# sample spacing -- fine for any LCD (~1-10 ms rise times) and adequate
+# for OLED (~100 us). Bump up for pathological-fast OLEDs if needed.
+DEFAULT_RISE_SAMPLE_RATE = 50_000.0
+
+# Window captured per transition (seconds). Includes the pre-flip
+# baseline period, the actual transition, and a post-transition tail
+# from which the plateau mean is measured.
+DEFAULT_RISE_WINDOW_S = 0.1
+
+# How long into the acquisition to delay before triggering the screen
+# flip. Gives enough pre-flip samples to estimate a clean baseline.
+DEFAULT_RISE_PRE_FLIP_S = 0.02
+
+
+@dataclass(frozen=True)
+class RiseTimeResult:
+    """Per-channel 10-90% rise and fall times for the black<->white transition.
+
+    Traces are retained so the caller can plot them for sanity check
+    (shape tells you whether the monitor is OLED-fast, LCD-slow with
+    overshoot, LCD-slow with long tail, etc.).
+    """
+
+    channels: tuple[str, ...]
+    rise_time_s: np.ndarray
+    fall_time_s: np.ndarray
+    sample_rate: float
+    pre_flip_s: float
+    rise_trace: np.ndarray  # (n_channels, n_samples) volts
+    fall_trace: np.ndarray
+
+
+def _transition_10_90(trace: np.ndarray, sample_rate: float) -> float:
+    """Return 10-90% (or 90-10%) transition time in seconds, or NaN.
+
+    Works for both rising and falling edges by normalizing the trace to
+    [0, 1] via (trace - baseline) / (plateau - baseline); thresholds are
+    always 0.1 and 0.9 on that scale, in that order.
+    """
+    n = trace.size
+    n_pre = max(20, n // 20)   # first 5% -> baseline
+    n_post = max(20, n // 10)  # last 10% -> plateau
+    baseline = float(trace[:n_pre].mean())
+    plateau = float(trace[-n_post:].mean())
+    span = plateau - baseline
+    if abs(span) < 0.01:  # <10 mV -- no real transition captured
+        return float("nan")
+
+    norm = (trace - baseline) / span  # goes 0 -> 1 for both rise and fall
+    # First sample crossing each threshold. argmax on a bool array gives
+    # the first True index, or 0 if none are True; check via the value.
+    crossed_10 = norm >= 0.1
+    crossed_90 = norm >= 0.9
+    if not crossed_10.any() or not crossed_90.any():
+        return float("nan")
+    i10 = int(np.argmax(crossed_10))
+    i90 = int(np.argmax(crossed_90))
+    if i90 <= i10:
+        return float("nan")
+
+    def interp(idx: int, threshold: float) -> float:
+        """Linear interpolate the sample index where norm crosses threshold."""
+        if idx == 0:
+            return 0.0
+        y0, y1 = norm[idx - 1], norm[idx]
+        if y1 == y0:
+            return float(idx)
+        return (idx - 1) + (threshold - y0) / (y1 - y0)
+
+    t10 = interp(i10, 0.1) / sample_rate
+    t90 = interp(i90, 0.9) / sample_rate
+    return t90 - t10
+
+
+def measure_rise_times(
+    display: Display,
+    daq: DAQ,
+    fine: FineLocations,
+    *,
+    radius_padding_px: int = 4,
+    duration: float = DEFAULT_RISE_WINDOW_S,
+    pre_flip_s: float = DEFAULT_RISE_PRE_FLIP_S,
+    sample_rate: float = DEFAULT_RISE_SAMPLE_RATE,
+    settle_time: float = DEFAULT_SETTLE_TIME_S,
+) -> RiseTimeResult:
+    """Measure 10-90% rise and fall time at each PD's fine position.
+
+    For each channel in `fine.channels`:
+      1. Draw a circle of matching polarity over the PD (radius derived
+         from the PD's FWHM plus `radius_padding_px` so the circle
+         saturates the PD).
+      2. Settle.
+      3. Start a single-channel, high-rate finite acquisition.
+      4. After pre_flip_s, flip to the opposite polarity.
+      5. Read the trace; detect 10-90% transition time.
+    Each PD gets one rise measurement (black->white) and one fall
+    measurement (white->black); single-channel acquisition avoids mux
+    crosstalk at high rate.
+    """
+    import time as _time  # local import: not used by the module elsewhere
+
+    n_chan = len(fine.channels)
+    rise_times = np.full(n_chan, np.nan)
+    fall_times = np.full(n_chan, np.nan)
+    n_samples = int(round(duration * sample_rate))
+    rise_traces = np.zeros((n_chan, n_samples), dtype=np.float64)
+    fall_traces = np.zeros((n_chan, n_samples), dtype=np.float64)
+
+    for i, chan in enumerate(fine.channels):
+        xi, yi = fine.x_pixels[i], fine.y_pixels[i]
+        if np.isnan(xi) or np.isnan(yi):
+            continue
+        cx, cy = int(round(float(xi))), int(round(float(yi)))
+        radius = int(max(fine.x_fwhm_px[i], fine.y_fwhm_px[i]) / 2) + radius_padding_px
+
+        # --- Rise: screen is fully black, flip to "white disk at PD". ---
+        display.black()
+        display.flip()
+        _time.sleep(settle_time)
+
+        def flip_to_white(cx=cx, cy=cy, r=radius):
+            _time.sleep(pre_flip_s)
+            display.circle(cx, cy, r)  # bg=0 fg=255
+            display.flip()
+
+        acq = daq.acquire_with_action(
+            duration, flip_to_white,
+            channels=(chan,), sample_rate=sample_rate,
+        )
+        trace = acq.samples[0]
+        n_eff = min(trace.size, n_samples)
+        rise_traces[i, :n_eff] = trace[:n_eff]
+        rise_times[i] = _transition_10_90(trace, sample_rate)
+
+        # --- Fall: white disk on black, flip to all-black. ---
+        display.circle(cx, cy, radius)
+        display.flip()
+        _time.sleep(settle_time)
+
+        def flip_to_black():
+            _time.sleep(pre_flip_s)
+            display.black()
+            display.flip()
+
+        acq = daq.acquire_with_action(
+            duration, flip_to_black,
+            channels=(chan,), sample_rate=sample_rate,
+        )
+        trace = acq.samples[0]
+        n_eff = min(trace.size, n_samples)
+        fall_traces[i, :n_eff] = trace[:n_eff]
+        fall_times[i] = _transition_10_90(trace, sample_rate)
+
+    display.black()
+    display.flip()
+
+    return RiseTimeResult(
+        channels=fine.channels,
+        rise_time_s=rise_times,
+        fall_time_s=fall_times,
+        sample_rate=sample_rate,
+        pre_flip_s=pre_flip_s,
+        rise_trace=rise_traces,
+        fall_trace=fall_traces,
+    )

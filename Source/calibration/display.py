@@ -131,10 +131,24 @@ class Display:
             (0, y_start, self._width, height),
         )
 
-    def circle(self, cx: int, cy: int, radius: int):
-        """Black screen with a single filled white circle at (cx, cy) of given radius."""
-        self.fill(0)
-        pygame.draw.circle(self._screen, (255, 255, 255), (cx, cy), radius)
+    def circle(
+        self,
+        cx: int, cy: int, radius: int,
+        *,
+        bg_value: int = 0,
+        fg_value: int = 255,
+    ):
+        """Fill with bg_value, then draw a filled circle in fg_value at (cx, cy).
+
+        Default (bg=0, fg=255) gives the original "white disk on black"
+        stimulus used by the diameter sweep. Swap the values to get a
+        black disk on white -- useful for measuring fall time (PD
+        transitioning bright to dark).
+        """
+        self.fill(bg_value)
+        pygame.draw.circle(
+            self._screen, (fg_value, fg_value, fg_value), (cx, cy), radius,
+        )
 
     def gray_stripes(self, axis: str, bit: int):
         """Render a Gray-coded stripe pattern along `axis` ('x' or 'y') for bit `bit`.

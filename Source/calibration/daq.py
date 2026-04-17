@@ -217,6 +217,71 @@ class DAQ:
             samples=buffer, channels=channels, sample_rate=rate,
         )
 
+    def acquire_with_action(
+        self,
+        duration: float,
+        action,
+        *,
+        channels: tuple[str, ...] | list[str] | None = None,
+        sample_rate: float | None = None,
+    ) -> Acquisition:
+        """Start a finite AI acquisition, fire `action()`, then read the samples.
+
+        Used when you need to trigger an external stimulus (e.g. a screen
+        flip) AFTER the DAQ has begun sampling but BEFORE the samples are
+        read back -- so the captured time series contains both the
+        pre-stimulus baseline and the transition.
+
+        `action` is a zero-arg callable run immediately after task.start().
+        Any pre-flip delay should be inside `action` (a time.sleep() is
+        fine; the hardware keeps sampling while Python sleeps).
+        """
+        if channels is None:
+            channels = self._all_channels
+        else:
+            channels = tuple(channels)
+        if len(channels) == 0:
+            raise ValueError("channels must be non-empty")
+
+        rate = float(sample_rate) if sample_rate is not None else self._sample_rate
+        n_samples = max(2, int(round(duration * rate)))
+
+        max_per_chan = self.max_multi_channel_rate / len(channels)
+        if rate > max_per_chan:
+            raise ValueError(
+                f"sample_rate={rate} Hz exceeds per-channel max "
+                f"{max_per_chan:.0f} Hz for {len(channels)} simultaneous "
+                f"channels on {self._device.product_type}."
+            )
+
+        v_min, v_max = self._voltage_range
+        buffer = np.empty((len(channels), n_samples), dtype=np.float64)
+
+        with nidaqmx.Task() as task:
+            for chan in channels:
+                task.ai_channels.add_ai_voltage_chan(
+                    chan,
+                    terminal_config=self._terminal_config,
+                    min_val=v_min,
+                    max_val=v_max,
+                )
+            task.timing.cfg_samp_clk_timing(
+                rate=rate,
+                sample_mode=AcquisitionType.FINITE,
+                samps_per_chan=n_samples,
+            )
+            reader = AnalogMultiChannelReader(task.in_stream)
+            task.start()
+            action()
+            reader.read_many_sample(
+                buffer, number_of_samples_per_channel=n_samples,
+                timeout=duration + 5.0,
+            )
+
+        return Acquisition(
+            samples=buffer, channels=channels, sample_rate=rate,
+        )
+
 
 def list_devices() -> list[str]:
     """Return the names of every NI-DAQmx device currently visible, e.g. ['Dev1']."""

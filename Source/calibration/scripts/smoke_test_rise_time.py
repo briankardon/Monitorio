@@ -1,0 +1,168 @@
+"""Manual smoke test: full pipeline + rise/fall time (piece 6).
+
+Runs baselines -> coarse -> fine -> rise-time measurement, reports per-PD
+10-90% rise and fall times, and saves the raw traces to a timestamped
+.npz so the actual transition waveforms can be inspected.
+
+Usage:
+    venv\\Scripts\\python Source\\calibration\\scripts\\smoke_test_rise_time.py \\
+        [--display N] [--device NAME] [--rise-rate HZ] [--rise-window SEC] \\
+        [--pre-flip SEC] [--save-traces PATH]
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+# Make the calibration package importable when run as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+import numpy as np
+
+from calibration.daq import DAQ, list_ai_channels, list_devices
+from calibration.display import Display, list_displays
+from calibration.procedure import (
+    DEFAULT_DC_SAMPLE_RATE,
+    DEFAULT_RISE_PRE_FLIP_S,
+    DEFAULT_RISE_SAMPLE_RATE,
+    DEFAULT_RISE_WINDOW_S,
+    characterize_baselines,
+    localize_coarse,
+    measure_rise_times,
+    refine_locations,
+)
+
+
+def _parse_args(argv):
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p.add_argument("--display", type=int, default=0)
+    p.add_argument("--device", type=str, default=None)
+    p.add_argument(
+        "--rise-rate", type=float, default=DEFAULT_RISE_SAMPLE_RATE,
+        dest="rise_rate",
+        help="per-channel sample rate for rise/fall acquisition (Hz)",
+    )
+    p.add_argument(
+        "--rise-window", type=float, default=DEFAULT_RISE_WINDOW_S,
+        dest="rise_window",
+        help="seconds per rise/fall acquisition",
+    )
+    p.add_argument(
+        "--pre-flip", type=float, default=DEFAULT_RISE_PRE_FLIP_S,
+        dest="pre_flip",
+        help="seconds to delay after acquisition start before flipping",
+    )
+    p.add_argument(
+        "--save-traces", type=str, default=None, dest="save_traces",
+        help="path to .npz file for the rise/fall traces (default: don't save)",
+    )
+    return p.parse_args(argv)
+
+
+def _both(display, msg):
+    print(msg)
+    display.message(msg + "\n\nPress any key to continue. ESC to quit.")
+    display.flip()
+    return display.wait_for_key()  # True on ESC
+
+
+def main() -> int:
+    args = _parse_args(sys.argv[1:])
+
+    if not list_devices() or not list_displays():
+        print("No DAQ or display found.")
+        return 1
+
+    device_name = args.device if args.device is not None else list_devices()[0]
+    chans = list_ai_channels(device_name)[:10]
+
+    with DAQ(device_name) as daq:
+        with Display(args.display) as display:
+            print(
+                f"Display {args.display}, DAQ {device_name} ({daq.product_type}); "
+                f"rise rate={args.rise_rate:.0f} Hz, window={args.rise_window*1000:.0f} ms, "
+                f"pre-flip={args.pre_flip*1000:.0f} ms"
+            )
+            if _both(
+                display,
+                "Rise-time measurement\n\n"
+                "Will run the full localization pipeline first,\n"
+                "then measure 10-90% rise and fall time per PD\n"
+                "using single-channel high-rate acquisition.\n\n"
+                "Do not cover the photodiodes.",
+            ):
+                return 0
+
+            print("\nbaselines...")
+            baseline = characterize_baselines(display, daq, channels=chans)
+            live = [c for c, l in zip(baseline.channels, baseline.liveness()) if l]
+            if not live:
+                display.message("No live channels.")
+                display.flip(); display.wait_for_key()
+                return 1
+
+            print("coarse localize...")
+            coarse = localize_coarse(display, daq, baseline, channels=live)
+            print("fine refine...")
+            fine = refine_locations(display, daq, baseline, coarse)
+            print("rise times...")
+            rt = measure_rise_times(
+                display, daq, fine,
+                duration=args.rise_window,
+                pre_flip_s=args.pre_flip,
+                sample_rate=args.rise_rate,
+            )
+
+            # Terminal report.
+            print("\nResults:")
+            hdr = f"  {'channel':<12}{'rise (ms)':>12}{'fall (ms)':>12}"
+            print(hdr)
+            print("  " + "-" * (len(hdr) - 2))
+            for i, c in enumerate(rt.channels):
+                print(
+                    f"  {c:<12}"
+                    f"{rt.rise_time_s[i]*1000:>12.3f}"
+                    f"{rt.fall_time_s[i]*1000:>12.3f}"
+                )
+
+            # Save traces for external plotting if requested.
+            if args.save_traces:
+                out_path = Path(args.save_traces)
+            else:
+                ts = time.strftime("%Y%m%d-%H%M%S")
+                out_path = Path(f"rise_time_traces_{ts}.npz")
+            np.savez(
+                out_path,
+                channels=np.array(rt.channels),
+                rise_time_s=rt.rise_time_s,
+                fall_time_s=rt.fall_time_s,
+                sample_rate=rt.sample_rate,
+                pre_flip_s=rt.pre_flip_s,
+                rise_trace=rt.rise_trace,
+                fall_trace=rt.fall_trace,
+            )
+            print(f"\nSaved raw traces to: {out_path.resolve()}")
+
+            # On-screen summary.
+            lines = ["Rise-time measurement complete", ""]
+            lines.append(f"{'channel':<10}{'rise (ms)':>12}{'fall (ms)':>12}")
+            for i, c in enumerate(rt.channels):
+                short = c.split("/")[-1]
+                lines.append(
+                    f"{short:<10}"
+                    f"{rt.rise_time_s[i]*1000:>12.3f}"
+                    f"{rt.fall_time_s[i]*1000:>12.3f}"
+                )
+            lines += ["", f"Traces: {out_path.name}", "", "Press any key to exit."]
+            display.message("\n".join(lines), size=max(20, display.height // 32))
+            display.flip()
+            display.wait_for_key()
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
