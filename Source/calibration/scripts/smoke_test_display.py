@@ -56,15 +56,30 @@ def main() -> int:
             ("Gray stripes Y, bit=5",                lambda: d.gray_stripes("y", 5)),
         ]
 
-        for label, draw in steps:
-            print(f"  -> {label}")
+        n = len(steps)
+        for i, (label, draw) in enumerate(steps, start=1):
+            # Step 1: on-screen intro + terminal log. Two outputs in parallel
+            # so both single-monitor and multi-monitor setups are covered.
+            intro = f"Step {i} / {n}\n\n{label}\n\nPress any key to display.  ESC to quit."
+            print(f"  [{i}/{n}] {label}")
+            d.message(intro)
+            d.flip()
+            if d.wait_for_key():
+                print("\nQuit requested.")
+                return 0
+
+            # Step 2: actual stimulus, clean (no text overlay).
             draw()
             d.flip()
             if d.wait_for_key():
                 print("\nQuit requested.")
                 return 0
 
+        # Closing screen so the user isn't left staring at the last pattern.
+        d.message("Smoke test complete.\n\nPress any key to exit.")
+        d.flip()
         print("\nAll primitives displayed.")
+        d.wait_for_key()
     return 0
 
 

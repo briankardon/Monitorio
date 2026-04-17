@@ -24,6 +24,12 @@ class DisplayInfo:
     height: int
 
 
+def _to_rgb(v: int | tuple[int, int, int]) -> tuple[int, int, int]:
+    if isinstance(v, int):
+        return (v, v, v)
+    return tuple(v)
+
+
 def list_displays() -> list[DisplayInfo]:
     """Return (index, width, height) for every attached display.
 
@@ -54,6 +60,7 @@ class Display:
 
     def __init__(self, display_index: int = 0, fullscreen: bool = True):
         pygame.display.init()
+        pygame.font.init()
         sizes = pygame.display.get_desktop_sizes()
         if display_index < 0 or display_index >= len(sizes):
             pygame.display.quit()
@@ -185,6 +192,46 @@ class Display:
         pygame.surfarray.blit_array(
             self._screen, pattern.transpose(1, 0, 2).copy(),
         )
+
+    def message(
+        self,
+        text: str,
+        *,
+        color: int | tuple[int, int, int] = 255,
+        bg_color: int | tuple[int, int, int] = 0,
+        size: int | None = None,
+        line_spacing: float = 1.25,
+    ):
+        """Clear to `bg_color` and render `text` centered on screen.
+
+        Intended for user-facing instructions on single-monitor rigs where
+        the terminal isn't visible during fullscreen capture. DO NOT leave
+        a message on screen while the DAQ is sampling -- the text's pixel
+        pattern will contaminate photodiode readings. Always render a
+        stimulus pattern (black/bar/circle/stripes) before sampling.
+
+        text may contain newlines for multi-line messages. `color` and
+        `bg_color` accept either a grayscale int in 0..255 or an (R, G, B)
+        tuple. `size` is the font pixel height; defaults to height // 28
+        (~40 px on a 1200-pixel-tall display).
+        """
+        fg = _to_rgb(color)
+        bg = _to_rgb(bg_color)
+        size_px = size if size is not None else max(20, self._height // 28)
+
+        font = pygame.font.Font(None, size_px)
+
+        self._screen.fill(bg)
+        lines = text.split("\n")
+        line_h = int(size_px * line_spacing)
+        total_h = line_h * len(lines)
+        y0 = (self._height - total_h) // 2
+        for i, line in enumerate(lines):
+            surf = font.render(line, True, fg)
+            rect = surf.get_rect(
+                center=(self._width // 2, y0 + i * line_h + line_h // 2),
+            )
+            self._screen.blit(surf, rect)
 
     # -------- presentation and input --------
 
