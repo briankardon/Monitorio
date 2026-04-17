@@ -79,7 +79,7 @@ if ~isempty(options.EnlargedSize)
     % Create a larger array to hold the enlarged video
     newVideoData = zeros([eH, eW, C, N]);
     % Place the video in the correct place in the larger array
-    newVideoData(padTop:padTop+H-1, padLeft:padLeft+W-1, :, :) = videoData;
+    newVideoData(padTop+1:padTop+H, padLeft+1:padLeft+W, :, :) = videoData;
 else
     % No enlargement requested
     newVideoData = videoData;
@@ -115,8 +115,12 @@ for f = 1:N
     for k = 1:nBits
         newVideoData(minY:maxY, minX:maxX, :, f) = drawCircle(newVideoData(minY:maxY, minX:maxX, :, f), bitXs(k)-minX, bitYs(k)-minY, options.BackgroundRadius, 0);
     end
-    % Draw white on bits
-    bitValues = bitget(f, 1:nBits);
+    % Draw white on bits. Frame number is Gray-coded so exactly one bit
+    %   changes per frame -- a decoder that samples mid-transition can only
+    %   ever be off by one frame, never read a wildly incorrect value.
+    % Pass nBits to grayEncode to catch overflow: truncated Gray codes
+    %   are not cyclic, so silent wrap-around would produce duplicate tags.
+    bitValues = bitget(grayEncode(f, nBits), 1:nBits);
     for k = 1:nBits
         if bitValues(k)
             newVideoData(minY:maxY, minX:maxX, :, f) = drawCircle(newVideoData(minY:maxY, minX:maxX, :, f), bitXs(k)-minX, bitYs(k)-minY, options.BitRadius, 255);
@@ -132,24 +136,23 @@ saveVideoData(newVideoData, videoPathOut);
 disp('...done saving video');
 
 function imageData = drawCircle(imageData, x, y, r, c)
-% drawCircle  Draw a circle outline into a color image.
+% drawCircle  Draw a filled disk into a color image.
 %
 %   imgOut = drawCircle(img, x, y, r, c)
 %
 % Inputs
-%   img : 2D grayscale image
+%   img : H-by-W-by-3 color image
 %   x   : horizontal center coordinate (column)
 %   y   : vertical center coordinate (row)
-%   r   : circle radius, in pixels
+%   r   : disk radius, in pixels
 %   c   : value to write to all color channels
 %
 % Output
-%   imgOut : image with circle drawn
+%   imgOut : image with filled disk drawn
 %
 % Notes
-%   - Circles extending beyond the image boundary are clipped safely.
+%   - Disks extending beyond the image boundary are clipped safely.
 %   - x and y may be non-integers.
-%   - This draws a 1-pixel-ish outline, not a filled disk.
 
     if ~isscalar(x) || ~isscalar(y) || ~isscalar(r) || ~isscalar(c)
         error('x, y, r, and c must be scalars.');
