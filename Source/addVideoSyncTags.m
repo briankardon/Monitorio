@@ -1,35 +1,50 @@
 function newVideoData = addVideoSyncTags(videoPathIn, videoPathOut, bitXs, bitYs, options)
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % addVideoSyncTags: Add synchronization tags to a video
-% usage: newVideoData = addVideoSyncTags(videoPathIn, videoPathOut, bitXs, 
+% usage: newVideoData = addVideoSyncTags(videoPathIn, videoPathOut, bitXs,
 %                           bitYs, options)
 %
 % where,
 %    videoPathIn is a path to an input video
 %    videoPathOut is a path to the output video to save
-%    bitXs is one or more pixel X-values for where to put the sync tags
-%    bitYs is one or more pixel Y-values for where to put the sync tags
+%    bitXs is one or more pixel X-values for where to put the sync tags.
+%        If omitted, must be supplied by CalibrationFile.
+%    bitYs is one or more pixel Y-values for where to put the sync tags.
+%        If omitted, must be supplied by CalibrationFile.
 %    Name/Value pairs can include:
-%       EnlargedSize
-%       BitRadius
-%       BackgroundRadius
-%       ProgressBar
+%       CalibrationFile  - path to a Monitorio calibration JSON (from
+%                          calibration/scripts/calibrate.py). Supplies
+%                          bitXs / bitYs / BitRadius / BackgroundRadius
+%                          as long as those weren't passed explicitly.
+%       BitRadius        - white-bit-circle radius, in pixels.
+%                          Required unless a CalibrationFile is given.
+%       BackgroundRadius - black-background-disk radius, in pixels.
+%                          Required unless a CalibrationFile is given.
+%       EnlargedSize     - [width, height] to pad the frame to
+%       ProgressBar      - logical, show a progress bar
 %    newVideoData is the sync tagged video as a 4D array
 %
-% This video adds synchronization tags to a video so a photodetector 
+% Each of bitXs / bitYs / BitRadius / BackgroundRadius must come from
+% either an explicit argument or a CalibrationFile (explicit wins). If
+% any of the four is still missing after argument resolution, the
+% function errors out -- there are no implicit defaults, because sensible
+% defaults depend on the specific Monitorio board + monitor combination
+% and there's no safe guess.
+%
+% This video adds synchronization tags to a video so a photodetector
 %   mounted to the screen can record frame changes precisely. It's possible
-%   to add an arbitrary number of sync tags to each frame; each sync tag 
+%   to add an arbitrary number of sync tags to each frame; each sync tag
 %   displays one bit of the frame number.
 % Sync tags are black filled circles with either a white or black circle
 %   inside to represent a 1 or a 0 bit.
 % bitXs and bitYs define the X and Y coordinates of each bit of the sync
-%   tag circle centers. For convenience, if one of these is a vector, and 
-%   the other is a scalar, the scalar one is repeated to match the length 
+%   tag circle centers. For convenience, if one of these is a vector, and
+%   the other is a scalar, the scalar one is repeated to match the length
 %   of the vector one.
 %
-% See also: 
+% See also: loadMonitorioCalibration
 %
-% Version: 1.0
+% Version: 1.1
 % Author:  Brian Kardon
 % Email:   bmk27=cornell*org, brian*kardon=google*com
 % Real_email = regexprep(Email,{'=','*'},{'@','.'})
@@ -37,12 +52,38 @@ function newVideoData = addVideoSyncTags(videoPathIn, videoPathOut, bitXs, bitYs
 arguments
     videoPathIn {mustBeText}
     videoPathOut {mustBeText}
-    bitXs double = [31, 88, 145, 202]
-    bitYs double = 40
+    bitXs double = []
+    bitYs double = []
+    options.CalibrationFile {mustBeText} = ''
+    options.BitRadius double = []
+    options.BackgroundRadius double = []
     options.EnlargedSize = []   % width x height
-    options.BitRadius = 20;
-    options.BackgroundRadius = 35;
     options.ProgressBar = false
+end
+
+% --- Resolve bit positions and radii ---
+% Values resolve as: explicit argument -> CalibrationFile -> missing (error).
+bitRadius = options.BitRadius;
+backgroundRadius = options.BackgroundRadius;
+
+if ~isempty(options.CalibrationFile)
+    cal = loadMonitorioCalibration(options.CalibrationFile);
+    if isempty(bitXs), bitXs = cal.bitXs; end
+    if isempty(bitYs), bitYs = cal.bitYs; end
+    if isempty(bitRadius), bitRadius = cal.bitRadius; end
+    if isempty(backgroundRadius), backgroundRadius = cal.backgroundRadius; end
+end
+
+missing = {};
+if isempty(bitXs), missing{end+1} = 'bitXs'; end
+if isempty(bitYs), missing{end+1} = 'bitYs'; end
+if isempty(bitRadius), missing{end+1} = 'BitRadius'; end
+if isempty(backgroundRadius), missing{end+1} = 'BackgroundRadius'; end
+if ~isempty(missing)
+    error('addVideoSyncTags:MissingConfig', ...
+        ['Missing required value(s): %s.\n' ...
+         'Pass them explicitly, or provide a CalibrationFile that specifies them.'], ...
+        strjoin(missing, ', '));
 end
 
 % Load the video data as a 4D array
@@ -97,7 +138,7 @@ if isscalar(bitYs)
 end
 
 % Get bit bounding box (faster to only operate on bounding box than whole frame)
-r = max(options.BitRadius, options.BackgroundRadius);
+r = max(bitRadius, backgroundRadius);
 minX = max(round(min(bitXs) - r), 1);
 maxX = min(round(max(bitXs) + r), W);
 minY = max(round(min(bitYs) - r), 1);
@@ -113,7 +154,7 @@ for f = 1:N
     end
     % Draw black backgrounds
     for k = 1:nBits
-        newVideoData(minY:maxY, minX:maxX, :, f) = drawCircle(newVideoData(minY:maxY, minX:maxX, :, f), bitXs(k)-minX, bitYs(k)-minY, options.BackgroundRadius, 0);
+        newVideoData(minY:maxY, minX:maxX, :, f) = drawCircle(newVideoData(minY:maxY, minX:maxX, :, f), bitXs(k)-minX, bitYs(k)-minY, backgroundRadius, 0);
     end
     % Draw white on bits. Frame number is Gray-coded so exactly one bit
     %   changes per frame -- a decoder that samples mid-transition can only
@@ -123,7 +164,7 @@ for f = 1:N
     bitValues = bitget(grayEncode(f, nBits), 1:nBits);
     for k = 1:nBits
         if bitValues(k)
-            newVideoData(minY:maxY, minX:maxX, :, f) = drawCircle(newVideoData(minY:maxY, minX:maxX, :, f), bitXs(k)-minX, bitYs(k)-minY, options.BitRadius, 255);
+            newVideoData(minY:maxY, minX:maxX, :, f) = drawCircle(newVideoData(minY:maxY, minX:maxX, :, f), bitXs(k)-minX, bitYs(k)-minY, bitRadius, 255);
         end
     end
 end
