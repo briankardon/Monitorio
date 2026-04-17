@@ -335,6 +335,11 @@ class FineLocations:
     above half-max on the respective axis. Useful as an estimate of the
     PD's sensitive diameter, which downstream steps (diameter sweep,
     circle placement) can seed from.
+
+    x_sweeps, y_sweeps carry the raw bar-sweep data per channel as
+    (positions_px, responses_volts) pairs -- the per-channel window
+    slice used to compute that channel's centroid. Retained for
+    diagnostic plotting.
     """
 
     channels: tuple[str, ...]
@@ -342,6 +347,8 @@ class FineLocations:
     y_pixels: np.ndarray
     x_fwhm_px: np.ndarray
     y_fwhm_px: np.ndarray
+    x_sweeps: tuple[tuple[np.ndarray, np.ndarray], ...]
+    y_sweeps: tuple[tuple[np.ndarray, np.ndarray], ...]
 
 
 def refine_locations(
@@ -431,6 +438,7 @@ def refine_locations(
         positions_arr = np.asarray(positions, dtype=np.float64)
         centers = np.full(n_live, np.nan, dtype=np.float64)
         fwhms = np.zeros(n_live, dtype=np.int64)
+        per_pd_sweeps: list[tuple[np.ndarray, np.ndarray]] = []
 
         # Minimum peak height (in volts above dark) to trust the refinement:
         # require the PD to have lit up to at least 10% of its baseline range.
@@ -441,6 +449,7 @@ def refine_locations(
             mask = (positions_arr >= lo) & (positions_arr <= hi)
             pos_j = positions_arr[mask]
             resp_j = responses[j, mask]
+            per_pd_sweeps.append((pos_j.copy(), resp_j.copy()))
             if resp_j.size == 0:
                 continue
             peak = float(resp_j.max())
@@ -456,10 +465,10 @@ def refine_locations(
             # FWHM (pixel count above half-peak; integer estimate of PD diameter).
             fwhms[j] = int(np.count_nonzero(resp_j >= peak / 2.0))
 
-        return centers, fwhms
+        return centers, fwhms, tuple(per_pd_sweeps)
 
-    x_fine, x_fwhm = sweep_axis("x", display.width, coarse.x_pixels)
-    y_fine, y_fwhm = sweep_axis("y", display.height, coarse.y_pixels)
+    x_fine, x_fwhm, x_sweeps = sweep_axis("x", display.width, coarse.x_pixels)
+    y_fine, y_fwhm, y_sweeps = sweep_axis("y", display.height, coarse.y_pixels)
 
     display.black()
     display.flip()
@@ -470,6 +479,8 @@ def refine_locations(
         y_pixels=y_fine,
         x_fwhm_px=x_fwhm,
         y_fwhm_px=y_fwhm,
+        x_sweeps=x_sweeps,
+        y_sweeps=y_sweeps,
     )
 
 

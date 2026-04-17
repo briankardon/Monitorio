@@ -57,7 +57,13 @@ def _parse_args(argv):
     )
     p.add_argument(
         "--save-traces", type=str, default=None, dest="save_traces",
-        help="path to .npz file for the rise/fall traces (default: don't save)",
+        help="path to .npz file for the rise/fall traces (default: "
+             "rise_time_traces_<timestamp>.npz in CWD)",
+    )
+    p.add_argument(
+        "--plot", action="store_true",
+        help="show a matplotlib figure of the rise and fall traces after "
+             "measurement completes",
     )
     return p.parse_args(argv)
 
@@ -172,6 +178,12 @@ def main() -> int:
             display.message("\n".join(lines), size=max(20, display.height // 32))
             display.flip()
             display.wait_for_key()
+
+    # Plot AFTER the Display context closes so the pygame fullscreen window
+    # doesn't overlap with the matplotlib window.
+    if args.plot:
+        from calibration.plot import plot_rise_time
+        plot_rise_time(rt)
 
     return 0
 

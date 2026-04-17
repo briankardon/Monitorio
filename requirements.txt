@@ -11,5 +11,4 @@ numpy>=1.26
 # separately on the host OS (not pip-installable).
 nidaqmx>=1.0
 
-# Added in piece 8 (diagnostic plotting):
-# matplotlib>=3.8
+matplotlib>=3.8

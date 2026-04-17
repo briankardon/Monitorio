@@ -67,6 +67,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         dest="refine_settle",
         help="settle time for the bar sweep (s); typically 5-10x shorter than --settle",
     )
+    p.add_argument(
+        "--plot", action="store_true",
+        help="show a matplotlib figure of the bar-sweep response per channel "
+             "after measurement completes",
+    )
     return p.parse_args(argv)
 
 
@@ -207,6 +212,12 @@ def main() -> int:
             display.message("\n".join(lines), size=max(18, display.height // 38))
             display.flip()
             display.wait_for_key()
+
+    # Plot AFTER closing the Display context so the pygame fullscreen window
+    # doesn't overlap with the matplotlib window.
+    if args.plot:
+        from calibration.plot import plot_refine
+        plot_refine(fine)
 
     return 0
 
