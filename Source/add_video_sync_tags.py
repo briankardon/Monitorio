@@ -36,6 +36,7 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -313,48 +314,128 @@ def _csv_ints(s: str):
     return [int(x) for x in s.split(",") if x]
 
 
+def _run_calibrate_subprocess(
+    *,
+    out_path: Path,
+    display: int | None,
+    device: str | None,
+    cache: str | None,
+    force: bool,
+) -> None:
+    """Invoke calibration/scripts/calibrate.py, writing JSON to out_path.
+
+    Forwards only the calibration-relevant options. calibrate.py still
+    runs its own interactive UI (intro prompt, plots, save confirmation),
+    so the operator has a chance to eyeball the result before the JSON
+    is written and tagging begins.
+    """
+    script = Path(__file__).resolve().parent / "calibration" / "scripts" / "calibrate.py"
+    cmd = [sys.executable, str(script), "--output", str(out_path)]
+    if display is not None:
+        cmd += ["--display", str(display)]
+    if device is not None:
+        cmd += ["--device", device]
+    if cache is not None:
+        cmd += ["--cache", cache]
+    if force:
+        cmd += ["--force"]
+
+    print(f"Running calibration: {' '.join(cmd)}")
+    proc = subprocess.run(cmd)
+    if proc.returncode != 0:
+        raise SystemExit(f"calibrate.py exited with code {proc.returncode}")
+    if not out_path.exists():
+        raise SystemExit(
+            "calibrate.py finished but no JSON was written -- "
+            "did you decline the save prompt?"
+        )
+
+
 def _cli():
     p = argparse.ArgumentParser(
         description="Overlay Gray-coded frame-number sync tags onto a video.",
     )
     p.add_argument("video_in", help="path to input video")
     p.add_argument("video_out", help="path to output video")
-    p.add_argument(
+
+    src = p.add_argument_group("parameter source (one of these is required)")
+    src.add_argument(
         "--calibration-file", dest="calibration_file", default=None,
-        help="path to Monitorio calibration JSON (from calibrate.py)",
+        help="path to an existing Monitorio calibration JSON",
     )
-    p.add_argument(
+    src.add_argument(
+        "--calibrate", action="store_true",
+        help="run calibrate.py first and use its JSON output (mutually "
+             "exclusive with --calibration-file). Calibration runs "
+             "interactively -- you'll see the instruction screens and "
+             "plots and be asked to confirm before tagging begins.",
+    )
+    src.add_argument(
         "--bit-xs", dest="bit_xs", type=_csv_ints, default=None,
         help="comma-separated list of X pixel positions",
     )
-    p.add_argument(
+    src.add_argument(
         "--bit-ys", dest="bit_ys", type=_csv_ints, default=None,
         help="comma-separated list of Y pixel positions (single value broadcasts)",
     )
-    p.add_argument("--bit-radius", dest="bit_radius", type=int, default=None)
-    p.add_argument(
+    src.add_argument("--bit-radius", dest="bit_radius", type=int, default=None)
+    src.add_argument(
         "--background-radius", dest="background_radius", type=int, default=None,
     )
-    p.add_argument(
+
+    cal_fwd = p.add_argument_group("forwarded to calibrate.py (used with --calibrate)")
+    cal_fwd.add_argument("--display", type=int, default=None)
+    cal_fwd.add_argument("--device", default=None, help="NI DAQ device name (e.g. Dev1)")
+    cal_fwd.add_argument(
+        "--cache", default=None,
+        help="path to pipeline cache .npz. Loaded if it exists, written if not.",
+    )
+    cal_fwd.add_argument(
+        "--force", action="store_true",
+        help="ignore any existing --cache and re-measure baselines+coarse+fine",
+    )
+
+    tag = p.add_argument_group("tagging options")
+    tag.add_argument(
         "--enlarged-size", dest="enlarged_size", type=_csv_ints, default=None,
         help="output dimensions WxH (e.g. 1920x1080) if input should be padded",
     )
-    p.add_argument(
+    tag.add_argument(
         "--crf", type=int, default=18,
         help="libx264 CRF (lower = higher quality, larger file). Default 18.",
     )
-    p.add_argument("--progress", action="store_true", help="print progress to stderr")
+    tag.add_argument("--progress", action="store_true", help="print per-frame progress")
     args = p.parse_args()
 
-    n = add_video_sync_tags(
-        video_in=args.video_in, video_out=args.video_out,
-        calibration_file=args.calibration_file,
-        bit_xs=args.bit_xs, bit_ys=args.bit_ys,
-        bit_radius=args.bit_radius, background_radius=args.background_radius,
-        enlarged_size=tuple(args.enlarged_size) if args.enlarged_size else None,
-        crf=args.crf, show_progress=args.progress,
-    )
-    print(f"wrote {n} frames to {args.video_out}")
+    if args.calibrate and args.calibration_file:
+        p.error("--calibrate and --calibration-file are mutually exclusive")
+
+    def _tag(calibration_file: str | None) -> None:
+        n = add_video_sync_tags(
+            video_in=args.video_in, video_out=args.video_out,
+            calibration_file=calibration_file,
+            bit_xs=args.bit_xs, bit_ys=args.bit_ys,
+            bit_radius=args.bit_radius, background_radius=args.background_radius,
+            enlarged_size=tuple(args.enlarged_size) if args.enlarged_size else None,
+            crf=args.crf, show_progress=args.progress,
+        )
+        print(f"wrote {n} frames to {args.video_out}")
+
+    if args.calibrate:
+        # Temp dir stays alive until after tagging completes so the JSON
+        # is still readable when add_video_sync_tags opens it.
+        with tempfile.TemporaryDirectory(
+            ignore_cleanup_errors=True,
+        ) as tmpdir:
+            cal_path = Path(tmpdir) / "calibration.json"
+            _run_calibrate_subprocess(
+                out_path=cal_path,
+                display=args.display, device=args.device,
+                cache=args.cache, force=args.force,
+            )
+            _tag(str(cal_path))
+    else:
+        _tag(args.calibration_file)
 
 
 if __name__ == "__main__":
