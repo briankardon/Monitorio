@@ -1,0 +1,14 @@
+# Monitorio Python calibration tool dependencies.
+# Target: Python 3.12+ (developed against 3.14).
+
+# Display / drawing. pygame-ce is preferred over pygame proper because
+# it publishes wheels for new Python versions faster.
+pygame-ce>=2.5
+
+numpy>=1.26
+
+# Added in piece 2 (DAQ integration):
+# nidaqmx>=1.0
+
+# Added in piece 8 (diagnostic plotting):
+# matplotlib>=3.8

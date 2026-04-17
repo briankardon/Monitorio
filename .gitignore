@@ -1,3 +1,13 @@
 **/notes/
 /Hardware/*/*.zip
 *-backups/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Claude Code local state
+.claude/
