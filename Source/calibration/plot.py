@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-from calibration.procedure import FineLocations, RiseTimeResult
+from calibration.procedure import CrosstalkResult, FineLocations, RiseTimeResult
 
 
 def _short(channel_name: str) -> str:
@@ -63,6 +63,58 @@ def plot_refine(
                 ax.set_ylabel("V above dark")
 
     fig.tight_layout(rect=(0, 0, 1, 0.97))
+    if save_path is not None:
+        fig.savefig(str(save_path), dpi=120)
+    if show:
+        plt.show()
+    return fig
+
+
+def plot_crosstalk(
+    result: CrosstalkResult,
+    *,
+    show: bool = True,
+    save_path: str | Path | None = None,
+):
+    """Heatmap of the normalized crosstalk matrix.
+
+    Row i = "PD i illuminated"; column j = "channel j's response as
+    fraction of its own dynamic range". Diagonal entries should be
+    ~1.0; off-diagonal should be near 0 for an acceptable setup. Cells
+    above `warn_threshold` are outlined.
+    """
+    labels = [c.split("/")[-1] for c in result.channels]
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(result.matrix, vmin=0, vmax=1, cmap="viridis", aspect="equal")
+    ax.set_xticks(range(len(labels)))
+    ax.set_yticks(range(len(labels)))
+    ax.set_xticklabels(labels)
+    ax.set_yticklabels(labels)
+    ax.set_xlabel("channel read (normalized to own dynamic range)")
+    ax.set_ylabel("PD circle illuminated")
+    ax.set_title(
+        f"Crosstalk matrix  (threshold = {result.warn_threshold:.1%}, "
+        f"{'OK' if result.acceptable else 'FAIL'})"
+    )
+
+    # Annotate each cell with its value and outline cells above threshold.
+    n = len(labels)
+    for i in range(n):
+        for j in range(n):
+            v = result.matrix[i, j]
+            color = "white" if v < 0.5 else "black"
+            ax.text(
+                j, i, f"{v:.2f}" if np.isfinite(v) else "nan",
+                ha="center", va="center", color=color, fontsize=9,
+            )
+            if i != j and np.isfinite(v) and abs(v) >= result.warn_threshold:
+                ax.add_patch(plt.Rectangle(
+                    (j - 0.5, i - 0.5), 1, 1,
+                    fill=False, edgecolor="tab:red", linewidth=2,
+                ))
+
+    fig.colorbar(im, ax=ax, shrink=0.8, label="fraction of channel's full bright")
+    fig.tight_layout()
     if save_path is not None:
         fig.savefig(str(save_path), dpi=120)
     if show:

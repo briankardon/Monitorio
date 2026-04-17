@@ -702,3 +702,161 @@ def measure_rise_times(
         rise_trace=rise_traces,
         fall_trace=fall_traces,
     )
+
+
+# --- bit-circle radius selection + crosstalk verification ---------------
+
+# Radius chosen so the circle a) saturates the PD's sensitive field and
+# b) stays well clear of the next PD's field. Saturation needs radius at
+# least ~FWHM/2; to cover the tails we bump that up by saturate_factor.
+# Circle mustn't approach a neighbor closer than `neighbor_clearance`
+# fraction of the neighbor distance, which for a typical Monitorio layout
+# with ~64 px PD spacing and ~24 px FWHM leaves a comfortable gap.
+DEFAULT_SATURATE_FACTOR = 1.5
+DEFAULT_NEIGHBOR_CLEARANCE = 0.4
+
+# Fraction of own dynamic range that off-target channels may show before
+# a crosstalk result is flagged unacceptable. 5% means a lit PD can
+# bleed into a neighbor at up to 5% of full bright before the script
+# warns -- well above the mux-ghost floor we established earlier
+# (<<0.1% at 5 kHz DC rate) but below anything that would meaningfully
+# corrupt a thresholded bit decode.
+DEFAULT_CROSSTALK_THRESHOLD = 0.05
+
+
+def pick_bit_radius_px(
+    fine: FineLocations,
+    *,
+    saturate_factor: float = DEFAULT_SATURATE_FACTOR,
+    neighbor_clearance: float = DEFAULT_NEIGHBOR_CLEARANCE,
+    min_radius_px: int = 4,
+) -> np.ndarray:
+    """Pick a bit-circle radius (px) per PD based on FWHM and neighbor spacing.
+
+    saturate_factor: multiplier on FWHM/2. 1.5 gives roughly 0.75 x FWHM,
+        which in practice saturates a Gaussian-like PD response (covers
+        it past the ~10% shoulders).
+    neighbor_clearance: circle radius may be at most this fraction of
+        the nearest-neighbor distance. 0.4 leaves a ~20% gap between
+        adjacent circles.
+
+    Returns int array of shape (n_channels,). When the two bounds
+    conflict (PDs too densely packed), the neighbor-clearance bound
+    wins and the returned radius may undersaturate the PD.
+    """
+    n = len(fine.channels)
+    positions = np.stack([fine.x_pixels, fine.y_pixels], axis=1)  # (n, 2)
+    fwhms = np.maximum(fine.x_fwhm_px, fine.y_fwhm_px).astype(np.float64)
+    target = np.ceil(fwhms / 2.0 * saturate_factor).astype(np.int64)
+
+    radii = np.zeros(n, dtype=np.int64)
+    for i in range(n):
+        if np.isnan(positions[i, 0]) or np.isnan(positions[i, 1]):
+            radii[i] = min_radius_px
+            continue
+        if n == 1:
+            upper = target[i]
+        else:
+            others = np.delete(positions, i, axis=0)
+            # Skip any neighbor with NaN position so it doesn't pollute the min.
+            valid = ~np.isnan(others).any(axis=1)
+            others = others[valid]
+            if others.shape[0] == 0:
+                upper = target[i]
+            else:
+                dists = np.sqrt(((others - positions[i]) ** 2).sum(axis=1))
+                upper = int(np.floor(dists.min() * neighbor_clearance))
+        radii[i] = max(min_radius_px, min(int(target[i]), upper))
+    return radii
+
+
+@dataclass(frozen=True)
+class CrosstalkResult:
+    """Normalized crosstalk matrix after lighting each PD's chosen circle.
+
+    matrix[i, j] is channel j's dark-subtracted response, normalized to
+    its own (baseline bright - baseline dark), when PD i's circle is
+    illuminated. Diagonal entries are ideally close to 1.0 (own PD fully
+    saturated); off-diagonal entries measure how much a lit PD spills
+    into every other channel.
+
+    max_crosstalk[i] is the max absolute off-diagonal entry in row i --
+    the worst channel-to-channel leak for circle i.
+
+    `acceptable` is True iff every max_crosstalk < warn_threshold.
+    """
+
+    channels: tuple[str, ...]
+    radii_px: np.ndarray
+    matrix: np.ndarray
+    max_crosstalk: np.ndarray
+    warn_threshold: float
+    acceptable: bool
+
+
+def measure_crosstalk(
+    display: Display,
+    daq: DAQ,
+    fine: FineLocations,
+    baseline: BaselineResult,
+    *,
+    radii_px: np.ndarray | None = None,
+    settle_time: float = DEFAULT_SETTLE_TIME_S,
+    duration: float = DEFAULT_WINDOW_S,
+    sample_rate: float | None = None,
+    warn_threshold: float = DEFAULT_CROSSTALK_THRESHOLD,
+) -> CrosstalkResult:
+    """Light each PD's chosen circle in turn and read every channel.
+
+    Fast sanity check that the picked circle radii don't cause neighbor
+    bleed. One measurement per PD (n_live total), so a full four-PD rig
+    finishes in well under 10 seconds.
+    """
+    import time as _time
+
+    rate = sample_rate if sample_rate is not None else DEFAULT_DC_SAMPLE_RATE
+    if radii_px is None:
+        radii_px = pick_bit_radius_px(fine)
+    radii = np.asarray(radii_px, dtype=np.int64)
+
+    target_channels = fine.channels
+    n = len(target_channels)
+    baseline_idx = [baseline.channels.index(c) for c in target_channels]
+    dark_m = baseline.dark_mean()[baseline_idx]
+    dyn_range = np.maximum(baseline.dynamic_range()[baseline_idx], 1e-9)
+
+    matrix = np.zeros((n, n), dtype=np.float64)
+    for i in range(n):
+        xi, yi = fine.x_pixels[i], fine.y_pixels[i]
+        if np.isnan(xi) or np.isnan(yi):
+            matrix[i, :] = np.nan
+            continue
+        cx, cy = int(round(float(xi))), int(round(float(yi)))
+        display.circle(cx, cy, int(radii[i]))
+        display.flip()
+        _time.sleep(settle_time)
+        acq = daq.acquire(duration=duration, channels=target_channels, sample_rate=rate)
+        response = acq.mean() - dark_m  # per channel, V above dark
+        matrix[i, :] = response / dyn_range
+
+    # Off-diagonal max per illuminated PD (absolute so a suspiciously
+    # negative number counts too).
+    max_crosstalk = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        row = np.abs(matrix[i].copy())
+        row[i] = 0.0
+        max_crosstalk[i] = float(row.max()) if row.size > 0 else 0.0
+
+    acceptable = bool(np.all(max_crosstalk < warn_threshold))
+
+    display.black()
+    display.flip()
+
+    return CrosstalkResult(
+        channels=target_channels,
+        radii_px=radii,
+        matrix=matrix,
+        max_crosstalk=max_crosstalk,
+        warn_threshold=warn_threshold,
+        acceptable=acceptable,
+    )
