@@ -33,7 +33,7 @@ import numpy as np
 
 from calibration.daq import DAQ, list_ai_channels, list_devices
 from calibration.display import Display, list_displays
-from calibration.procedure import characterize_baselines
+from calibration.procedure import DEFAULT_DC_SAMPLE_RATE, characterize_baselines
 
 
 def _format_table(channels, rows) -> str:
@@ -90,17 +90,15 @@ def main() -> int:
 
     display_index = args.display
     device_name = args.device if args.device is not None else devices[0]
+    effective_rate = (
+        args.sample_rate if args.sample_rate is not None
+        else DEFAULT_DC_SAMPLE_RATE
+    )
 
     all_chans = list_ai_channels(device_name)
 
-    # If --sample-rate was given, configure the DAQ for it up front so the
-    # aggregate-rate sanity check at acquire time uses the right rate.
-    daq_kwargs = {}
-    if args.sample_rate is not None:
-        daq_kwargs["sample_rate"] = args.sample_rate
-
-    with DAQ(device_name, **daq_kwargs) as daq:
-        max_at_rate = int(daq.max_multi_channel_rate // daq.sample_rate)
+    with DAQ(device_name) as daq:
+        max_at_rate = int(daq.max_multi_channel_rate // effective_rate)
         default_n = min(len(all_chans), max_at_rate)
         n_channels = args.channels if args.channels is not None else default_n
         n_channels = min(n_channels, len(all_chans))
@@ -109,7 +107,7 @@ def main() -> int:
         print(
             f"\nRunning with display {display_index}, DAQ {device_name} "
             f"({daq.product_type}), {n_channels} AI channel(s) @ "
-            f"{daq.sample_rate:.0f} Hz."
+            f"{effective_rate:.0f} Hz."
         )
 
         with Display(display_index) as display:
@@ -123,7 +121,9 @@ def main() -> int:
                 return 0
 
             print("\nMeasuring dark and bright baselines...")
-            result = characterize_baselines(display, daq, channels=channels)
+            result = characterize_baselines(
+                display, daq, channels=channels, sample_rate=effective_rate,
+            )
 
             # Terminal report.
             rows = [

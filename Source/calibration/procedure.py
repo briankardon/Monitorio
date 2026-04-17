@@ -33,11 +33,23 @@ DEFAULT_SETTLE_TIME_S = 0.2
 # Default DAQ sampling window for each per-pattern measurement.
 DEFAULT_WINDOW_S = 0.1
 
+# Default per-channel sample rate for DC-level measurements (baselines,
+# localization, crosstalk). At 50 kHz per channel the PCIe-6343's mux has
+# only ~2 us per channel to settle between neighbors, which leaves a few
+# mV of residue from the previous channel on even a low-impedance input.
+# 5 kHz gives 10x the settle budget and drops the residue below the
+# noise floor, making liveness/localization results insensitive to how
+# many channels are simultaneously scanned. Rise-time measurements don't
+# use this default -- they need high rate and are run single-channel to
+# sidestep the mux entirely.
+DEFAULT_DC_SAMPLE_RATE = 5000.0
+
 # Signal-to-noise ratio above which a channel is considered "live" --
 # i.e. actually reading light off the screen, not a floating input.
 # A channel with dynamic range < LIVENESS_NOISE_STDS * dark_noise_std is
-# treated as dead. Very loose because we expect a >100x gap between
-# connected and unconnected channels.
+# treated as dead. Very loose because at DEFAULT_DC_SAMPLE_RATE we expect
+# a >1000x gap between connected channels and both unconnected channels
+# and any residual mux ghosting.
 DEFAULT_LIVENESS_THRESHOLD_STDS = 10.0
 
 
@@ -127,16 +139,22 @@ def characterize_baselines(
     Returns a BaselineResult from which the caller can derive dynamic
     range, SNR, and a liveness mask. Leaves the screen black when done so
     subsequent measurements start from a defined state.
+
+    sample_rate defaults to DEFAULT_DC_SAMPLE_RATE (slower than the DAQ's
+    default) because DC measurements don't benefit from fast scanning and
+    the slower rate eliminates multiplexer settling crosstalk that would
+    otherwise show up as small ghost responses on unconnected channels.
     """
+    rate = sample_rate if sample_rate is not None else DEFAULT_DC_SAMPLE_RATE
     dark = measure_after_render(
         display, daq, lambda d: d.black(),
         settle_time=settle_time, duration=duration,
-        channels=channels, sample_rate=sample_rate,
+        channels=channels, sample_rate=rate,
     )
     bright = measure_after_render(
         display, daq, lambda d: d.white(),
         settle_time=settle_time, duration=duration,
-        channels=channels, sample_rate=sample_rate,
+        channels=channels, sample_rate=rate,
     )
     # Restore black so the next step doesn't leak white light into whatever
     # measurement follows.
