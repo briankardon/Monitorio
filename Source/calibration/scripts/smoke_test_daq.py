@@ -11,8 +11,10 @@ Usage:
     venv\\Scripts\\python Source\\calibration\\scripts\\smoke_test_daq.py [device_name] [n_channels]
 
 If device_name is omitted, the first detected device is used.
-If n_channels is omitted, min(4, all-AI-channels) is used -- kept low so
-sample_rate * n_channels stays well under the DAQ's aggregate AI rate.
+If n_channels is omitted, the script uses as many AI channels as can run
+at the default sample rate without exceeding the DAQ's aggregate AI rate
+(i.e. floor(aggregate_rate / sample_rate)), capped by the physical
+channel count. Always in single-ended (RSE) mode.
 """
 
 from __future__ import annotations
@@ -53,14 +55,23 @@ def main() -> int:
         return 1
 
     device_name = sys.argv[1] if len(sys.argv) > 1 else devices[0]
-    requested_n = int(sys.argv[2]) if len(sys.argv) > 2 else 4
-
     all_chans = list_ai_channels(device_name)
-    n_channels = min(requested_n, len(all_chans))
-    channels = tuple(all_chans[:n_channels])
-    print(f"\nUsing {device_name}, first {n_channels} AI channel(s): {list(channels)}")
 
     with DAQ(device_name) as daq:
+        # Default: as many channels as the aggregate AI rate allows at the
+        # DAQ's default per-channel sample rate, capped at all physical
+        # channels. For the PCIe-6343 (500 kS/s aggregate) @ 50 kHz that
+        # works out to 10 channels; for faster rates the count shrinks
+        # automatically. The user can still override via CLI arg.
+        max_at_default_rate = int(daq.max_multi_channel_rate // daq.sample_rate)
+        default_n = min(len(all_chans), max_at_default_rate)
+        requested_n = int(sys.argv[2]) if len(sys.argv) > 2 else default_n
+        n_channels = min(requested_n, len(all_chans))
+        channels = tuple(all_chans[:n_channels])
+        print(
+            f"\nUsing {device_name}, first {n_channels} AI channel(s) in "
+            f"single-ended (RSE) mode: {list(channels)}"
+        )
         print(
             f"  product: {daq.product_type}\n"
             f"  default per-channel rate: {daq.sample_rate:.0f} Hz\n"
