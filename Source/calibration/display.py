@@ -193,6 +193,33 @@ class Display:
             self._screen, pattern.transpose(1, 0, 2).copy(),
         )
 
+    def annotated_points(
+        self,
+        points: list[tuple[int, int, str]],
+        *,
+        radius: int = 10,
+        color: int | tuple[int, int, int] = 255,
+        label_color: int | tuple[int, int, int] = 255,
+        label_size: int | None = None,
+    ):
+        """Black screen with a filled circle + text label at each point.
+
+        Intended for visual verification of localized PD positions: each
+        `(x, y, label)` is rendered as a circle centered at (x, y) with
+        `label` placed just to the upper-right. Like message(), this
+        overlays text and must not be on screen during DAQ sampling.
+        """
+        pt_color = _to_rgb(color)
+        lbl_color = _to_rgb(label_color)
+        size = label_size if label_size is not None else max(18, self._height // 45)
+        font = pygame.font.Font(None, size)
+        self._screen.fill((0, 0, 0))
+        for (x, y, label) in points:
+            pygame.draw.circle(self._screen, pt_color, (int(x), int(y)), radius)
+            if label:
+                surf = font.render(label, True, lbl_color)
+                self._screen.blit(surf, (int(x) + radius + 4, int(y) - radius))
+
     def message(
         self,
         text: str,
