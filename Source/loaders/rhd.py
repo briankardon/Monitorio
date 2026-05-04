@@ -39,10 +39,95 @@ unpacking.
 
 from __future__ import annotations
 
+import datetime
+import re
 import struct
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
+
+# Default Intan filename convention: <base>_YYMMDD_HHMMSS.rhd. Match the
+# datetime substring at the end of the stem and parse it as %y%m%d_%H%M%S.
+# Override `parse_filename_timestamp` for setups that use a different
+# convention.
+_INTAN_DATETIME_RE = re.compile(r"_(\d{6})_(\d{6})$")
+
+
+@dataclass(frozen=True)
+class FileBoundary:
+    """Where one source file lives within the concatenated samples.
+
+    path:                   the source file
+    start_wall_clock:       UTC datetime parsed from the filename
+                            (or filesystem mtime as fallback). The wall
+                            clock at which sample
+                            `sample_offset_in_concat` of the
+                            concatenated array was recorded.
+    n_samples:              samples this file contributed
+    sample_offset_in_concat: index of this file's first sample in the
+                            concatenated output (so the concatenated
+                            samples for this file are
+                            samples[:, sample_offset_in_concat :
+                                       sample_offset_in_concat + n_samples])
+    """
+    path: Path
+    start_wall_clock: datetime.datetime
+    n_samples: int
+    sample_offset_in_concat: int
+
+
+@dataclass(frozen=True)
+class RecordingBundle:
+    """Result of loading one or more RHD files.
+
+    Iterable as a 4-tuple `(samples, sample_rate, channel_names,
+    file_boundaries)` for convenient unpacking, but attribute access
+    (bundle.samples, bundle.file_boundaries, ...) is the recommended
+    style.
+    """
+    samples: np.ndarray             # (n_channels, n_total_samples) in volts
+    sample_rate: float              # Hz
+    channel_names: list[str]        # one entry per row of `samples`
+    file_boundaries: list[FileBoundary]
+
+    def __iter__(self):
+        yield self.samples
+        yield self.sample_rate
+        yield self.channel_names
+        yield self.file_boundaries
+
+
+def parse_intan_filename_timestamp(path: Path) -> datetime.datetime | None:
+    """Parse the wall-clock start time from a standard Intan filename
+    (`<base>_YYMMDD_HHMMSS.rhd`). Returns a naive datetime in the local
+    rig's timezone (RHD doesn't record TZ; same-system playback log
+    will share whatever the OS clock was). Returns None if the filename
+    doesn't match the convention -- caller can then fall back to the
+    file's mtime.
+    """
+    m = _INTAN_DATETIME_RE.search(path.stem)
+    if not m:
+        return None
+    try:
+        return datetime.datetime.strptime(
+            f"{m.group(1)}_{m.group(2)}", "%y%m%d_%H%M%S",
+        )
+    except ValueError:
+        return None
+
+
+def file_start_wall_clock(path: Path) -> datetime.datetime:
+    """Best-effort wall-clock start time for an RHD file.
+
+    Tries the Intan filename convention first; falls back to the
+    filesystem mtime. Returns a naive datetime (no timezone).
+    """
+    parsed = parse_intan_filename_timestamp(path)
+    if parsed is not None:
+        return parsed
+    return datetime.datetime.fromtimestamp(path.stat().st_mtime)
 
 # Per the RHD file-format spec.
 RHD_MAGIC = 0xC6912702
@@ -73,7 +158,7 @@ SIGNAL_TYPE_BOARD_DIN = 4
 SIGNAL_TYPE_BOARD_DOUT = 5
 
 
-def load_rhd_board_adc(paths) -> tuple[np.ndarray, float, list[str]]:
+def load_rhd_board_adc(paths) -> RecordingBundle:
     """Load controller-box analog input channels from one or more .rhd files.
 
     "Board ADC" in the spec; called "Analog In" on the Intan Recording
@@ -81,8 +166,9 @@ def load_rhd_board_adc(paths) -> tuple[np.ndarray, float, list[str]]:
     Interface Board's screw terminals. This is where Monitorio
     recordings normally route the photodiode signals.
 
-    paths, return value, errors: see the load_rhd_aux docstring -- same
-    semantics, different physical inputs.
+    See load_rhd_aux for arg / error semantics; this is the same
+    machinery for a different physical input. Returns a
+    RecordingBundle (also unpackable as a 4-tuple).
 
     Sample rate is the full amplifier rate (these channels are sampled
     at the amp rate, not 1/4 of it like the headstage aux). Voltage
@@ -91,7 +177,7 @@ def load_rhd_board_adc(paths) -> tuple[np.ndarray, float, list[str]]:
     return _load_signal_type(paths, SIGNAL_TYPE_BOARD_ADC)
 
 
-def load_rhd_aux(paths) -> tuple[np.ndarray, float, list[str]]:
+def load_rhd_aux(paths) -> RecordingBundle:
     """Load headstage auxiliary input channels from one or more .rhd files.
 
     These are the AUX1/AUX2/AUX3 inputs on each RHD chip's headstage --
@@ -104,12 +190,16 @@ def load_rhd_aux(paths) -> tuple[np.ndarray, float, list[str]]:
            concatenated along the time axis. All files must share the
            same enabled-channel layout and sample rate.
 
-    Returns:
+    Returns a RecordingBundle (samples, sample_rate, channel_names,
+    file_boundaries). Iterable as a 4-tuple for convenience.
+
         samples: (n_channels, n_total_samples) float64 in volts
-        sample_rate: float, sample rate (Hz). For aux inputs that's
-                     amp_rate / 4 (e.g. 20 kHz amps -> 5 kHz aux).
-        channel_names: list[str] of native channel names, in the same
-                       order as the rows of `samples`.
+        sample_rate: Hz. For aux inputs that's amp_rate / 4 (e.g.
+                     20 kHz amps -> 5 kHz aux).
+        channel_names: list[str], one entry per row of `samples`.
+        file_boundaries: list[FileBoundary], one per source file in
+                     load order. Lets callers map between wall-clock
+                     time and concatenated sample indices.
 
     Raises:
         ValueError: bad magic number, no enabled channels of the
@@ -122,7 +212,7 @@ def load_rhd_aux(paths) -> tuple[np.ndarray, float, list[str]]:
 
 # ----- shared multi-file driver --------------------------------------
 
-def _load_signal_type(paths, signal_type: int):
+def _load_signal_type(paths, signal_type: int) -> RecordingBundle:
     if isinstance(paths, (str, Path)):
         path_list = [Path(paths)]
     else:
@@ -131,8 +221,10 @@ def _load_signal_type(paths, signal_type: int):
         raise ValueError("paths is empty")
 
     arrays = []
+    boundaries: list[FileBoundary] = []
     sample_rate = None
     channel_names = None
+    cum_offset = 0
     for p in path_list:
         samples_v, rate, names = _load_one(p, signal_type=signal_type)
         if sample_rate is None:
@@ -151,13 +243,26 @@ def _load_signal_type(paths, signal_type: int):
                     f"files had {channel_names}; refusing to concatenate "
                     f"recordings with different channel layouts."
                 )
+        n_samples = samples_v.shape[1]
+        boundaries.append(FileBoundary(
+            path=p,
+            start_wall_clock=file_start_wall_clock(p),
+            n_samples=n_samples,
+            sample_offset_in_concat=cum_offset,
+        ))
+        cum_offset += n_samples
         arrays.append(samples_v)
 
     if len(arrays) == 1:
         samples = arrays[0]
     else:
         samples = np.concatenate(arrays, axis=1)
-    return samples, float(sample_rate), list(channel_names)
+    return RecordingBundle(
+        samples=samples,
+        sample_rate=float(sample_rate),
+        channel_names=list(channel_names),
+        file_boundaries=boundaries,
+    )
 
 
 # ----- per-file loading -----------------------------------------------

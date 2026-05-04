@@ -44,6 +44,10 @@ Source/
     scripts/
       calibrate.py         CLI: full calibration end-to-end -> JSON output
       smoke_test_*.py      individual stage tests for development
+  decode_stream.py         CLI: batch-decode every playback in a session
+                           (pairs a playback log with a directory of
+                           recordings, identifies the right files per
+                           playback by timestamp, runs decode_sync_tags)
   loaders/                 File-format loaders for decoder input
     rhd.py                 Intan RHD2000 .rhd parser (board ADC + headstage aux)
   playback/                Random-playback session driver
@@ -211,10 +215,10 @@ After recording, decode in Python:
 from decode_sync_tags import decode_sync_tags
 from loaders.rhd import load_rhd_board_adc   # Intan; or roll your own loader
 
-samples, sample_rate, _ = load_rhd_board_adc(["recording.rhd", "recording_2.rhd"])
+bundle = load_rhd_board_adc(["recording.rhd", "recording_2.rhd"])
 result = decode_sync_tags(
-    samples[2:5],                # the 3 channels carrying the PD signals
-    sample_rate=sample_rate,
+    bundle.samples[2:5],         # the 3 channels carrying the PD signals
+    sample_rate=bundle.sample_rate,
     video_path="exp01_tagged.mp4",
     calibration_path="cal.json",
     output_path="frame_table.csv",
@@ -561,6 +565,62 @@ indefinitely until the operator presses ESC -- so the post-session
 view doesn't snap back to whatever Windows was showing underneath
 mid-experiment. The log flushes after every play, so an aborted
 session loses at most the in-progress play.
+
+
+## Batch-decoding a whole session
+
+`Source/decode_stream.py` is the natural endpoint of the pipeline:
+take a `play_random.py` playback log + a directory of recording files
++ a calibration JSON, and get back one decode per playback. Internally
+it pairs each log entry with the recording file(s) whose wall-clock
+coverage overlaps the playback's expected window, runs the decoder
+on the right slice of samples, and writes a per-playback CSV plus a
+session-wide summary CSV.
+
+```bash
+venv/Scripts/python Source/decode_stream.py \
+    playback_log_20260501T160904.csv \
+    /path/to/recordings/ \
+    --loader rhd \
+    --pd-channels 2,3,4 \
+    --calibration cal.json \
+    --output-dir decoded/
+```
+
+Or as a Python function:
+
+```python
+from decode_stream import decode_stream
+
+results = decode_stream(
+    playback_log=Path("playback_log_20260501T160904.csv"),
+    recording_dir=Path("/path/to/recordings/"),
+    loader="rhd",
+    pd_channels=[2, 3, 4],            # 0-based indices into the loaded
+                                      # channel array; sync first
+    calibration_path=Path("cal.json"),
+    output_dir=Path("decoded/"),
+)
+# results is a list of StreamResult: per-playback status, frame
+# table, drift, warnings, and the path to the per-play decoded CSV.
+```
+
+The wall-clock anchor for each recording file is its filename
+timestamp (Intan's `<base>_YYMMDD_HHMMSS.rhd` convention; falls back
+to mtime). If the playback log's clock disagrees with the recording
+filenames' clock by more than ~1 s, decode_stream warns; if the
+disagreement is large enough that no overlapping file is found for
+a playback, that row is marked `missing` rather than failing the
+whole batch. If a chosen sync segment hits the start or end of the
+loaded data (i.e. the actual signal extends into an adjacent file we
+didn't initially load), decode_stream automatically extends the file
+range and retries.
+
+The loader knob is open-ended: `--loader rhd` is the only registered
+one today, but adding TDMS / OpenEphys / other formats is one entry
+in the `LOADERS` dict in `decode_stream.py` plus a `load_*` function
+that returns a `RecordingBundle`-shaped object (samples + sample
+rate + channel names + per-file wall-clock boundaries).
 
 
 ## Smoke tests
