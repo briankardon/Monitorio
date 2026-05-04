@@ -616,6 +616,17 @@ loaded data (i.e. the actual signal extends into an adjacent file we
 didn't initially load), decode_stream automatically extends the file
 range and retries.
 
+If the playback driver and the recording controller live on
+different host machines whose system clocks aren't NTP-synced,
+pass `--clock-offset-s` (or `clock_offset_s=` to the function) with
+the offset between them, defined as
+`recording_clock_seconds - playback_clock_seconds`. Empirical
+recipe: run once with offset 0, look at the `segment_drift_s`
+column of the summary CSV; if every row reports about the same
+drift, that's the offset to plug in for subsequent runs. After
+correction, drift should be tens to hundreds of ms (player startup
+lag plus the filename-timestamp-vs-actual-sample-0 lag).
+
 The loader knob is open-ended: `--loader rhd` is the only registered
 one today, but adding TDMS / OpenEphys / other formats is one entry
 in the `LOADERS` dict in `decode_stream.py` plus a `load_*` function

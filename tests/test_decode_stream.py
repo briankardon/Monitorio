@@ -148,6 +148,85 @@ def test_read_playback_log_parses_real_session_format(tmp_path):
     assert rows[0]["index"] == 1
 
 
+def test_decode_one_playback_applies_clock_offset(monkeypatch, tmp_path):
+    """clock_offset_s should shift the expected wall-clock time the
+    matcher uses, without otherwise changing behavior. We verify by
+    intercepting the inner _attempt_decode_window and checking the
+    expected_start_dt that gets passed in."""
+    import datetime
+    from decode_stream import StreamResult, _decode_one_playback
+
+    captured = {}
+
+    def fake_attempt_decode_window(**kwargs):
+        captured["expected_start_dt"] = kwargs["expected_start_dt"]
+        return None, None, None
+
+    monkeypatch.setattr(
+        "decode_stream._attempt_decode_window",
+        fake_attempt_decode_window,
+    )
+
+    play = {
+        "index": 1,
+        "video": "/v.mp4",
+        "started_unix": 1000.0,
+        "started_iso": "...",
+        "expected_duration_s": 10.0,
+    }
+    # Two files an hour apart -- pick whichever happens to "cover" the
+    # offsetted window; we don't care about the actual decode.
+    files = [tmp_path / "f0.rhd", tmp_path / "f1.rhd"]
+    for f in files:
+        f.touch()
+    file_starts = [
+        datetime.datetime.fromtimestamp(900.0),    # 100 s before play
+        datetime.datetime.fromtimestamp(60_000.0),   # well after play
+    ]
+
+    # No offset: expected_start_dt should be at started_unix.
+    _decode_one_playback(
+        play=play,
+        all_files=files, file_starts=file_starts,
+        load_func=lambda paths: None,
+        pd_channels=[0],
+        calibration_path=Path("/cal.json"),
+        margin_s=5.0, drift_warn_s=1.0,
+        sample_rate_for_units=1.0,
+        clock_offset_s=0.0,
+        output_csv=None,
+    )
+    assert captured["expected_start_dt"] == datetime.datetime.fromtimestamp(1000.0)
+
+    # +30 offset: expected_start_dt should advance by 30 s.
+    _decode_one_playback(
+        play=play,
+        all_files=files, file_starts=file_starts,
+        load_func=lambda paths: None,
+        pd_channels=[0],
+        calibration_path=Path("/cal.json"),
+        margin_s=5.0, drift_warn_s=1.0,
+        sample_rate_for_units=1.0,
+        clock_offset_s=30.0,
+        output_csv=None,
+    )
+    assert captured["expected_start_dt"] == datetime.datetime.fromtimestamp(1030.0)
+
+    # Negative offset works too.
+    _decode_one_playback(
+        play=play,
+        all_files=files, file_starts=file_starts,
+        load_func=lambda paths: None,
+        pd_channels=[0],
+        calibration_path=Path("/cal.json"),
+        margin_s=5.0, drift_warn_s=1.0,
+        sample_rate_for_units=1.0,
+        clock_offset_s=-2.5,
+        output_csv=None,
+    )
+    assert captured["expected_start_dt"] == datetime.datetime.fromtimestamp(997.5)
+
+
 def test_recording_bundle_unpacks_as_4_tuple():
     """RecordingBundle should iterate as (samples, rate, names,
     boundaries) so existing 4-element tuple unpacking works."""

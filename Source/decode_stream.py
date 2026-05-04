@@ -114,6 +114,7 @@ def decode_stream(
     margin_s: float = 5.0,
     drift_warn_s: float = 1.0,
     sample_rate_for_units: float | str = 1.0,
+    clock_offset_s: float = 0.0,
 ) -> list[StreamResult]:
     """Decode every playback in `playback_log` against recordings in
     `recording_dir`.
@@ -131,11 +132,29 @@ def decode_stream(
               playback window when picking which files to load + when
               extracting the sub-window for decode_sync_tags.
     drift_warn_s: warn if the actual sync-on segment starts more than
-                  this far from the expected wall-clock time.
+                  this far from the expected wall-clock time (after
+                  any clock_offset_s correction).
     sample_rate_for_units: passed to decode_sync_tags as `scale`. The
                   RHD loader returns samples in volts, so the default
                   scale=1.0 is right; this knob is here in case someone
                   wires a non-volt-returning loader into the registry.
+    clock_offset_s: clock offset between the playback driver's host
+                  and the recording controller's host, defined as
+                  (recording_clock_seconds - playback_clock_seconds).
+                  When the two run on the same machine (the common
+                  case) this is 0. When they're on separate machines
+                  whose system clocks aren't NTP-synced, set this to
+                  the offset so the playback log's wall-clock
+                  timestamps line up with the recording filenames'
+                  wall-clock timestamps. Positive value: the
+                  recording machine's clock runs ahead of the
+                  playback machine's. Empirical recipe: run once with
+                  clock_offset_s=0, look at the segment_drift_s
+                  column of the summary CSV; if every row reports a
+                  drift of about the same value, that's the
+                  offset to plug in here. Drift after correction
+                  should be tens to hundreds of ms (player startup
+                  lag, filename-timestamp-vs-actual-sample-0 lag).
     """
     if loader not in LOADERS:
         raise ValueError(
@@ -178,6 +197,13 @@ def decode_stream(
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
+    if clock_offset_s != 0:
+        print(
+            f"[decode_stream] applying clock_offset_s={clock_offset_s:+.4f} "
+            f"(playback timestamps shifted to match the recording host's clock)",
+            file=sys.stderr,
+        )
+
     results: list[StreamResult] = []
     for play in plays:
         print(
@@ -199,6 +225,7 @@ def decode_stream(
             margin_s=margin_s,
             drift_warn_s=drift_warn_s,
             sample_rate_for_units=sample_rate_for_units,
+            clock_offset_s=clock_offset_s,
             output_csv=per_play_csv,
         )
         _print_play_summary(result)
@@ -223,6 +250,7 @@ def _decode_one_playback(
     margin_s: float,
     drift_warn_s: float,
     sample_rate_for_units,
+    clock_offset_s: float,
     output_csv: Path | None,
 ) -> StreamResult:
     base = StreamResult(
@@ -233,7 +261,13 @@ def _decode_one_playback(
         expected_duration_s=play["expected_duration_s"],
     )
 
-    expected_start_dt = datetime.datetime.fromtimestamp(play["started_unix"])
+    # Convert the playback's wall-clock timestamp into the recording
+    # host's clock by adding clock_offset_s. (Recording files' wall-
+    # clock anchors come from their filename timestamps, written by
+    # the recording controller's clock.)
+    expected_start_dt = datetime.datetime.fromtimestamp(
+        play["started_unix"] + clock_offset_s,
+    )
     expected_end_dt = expected_start_dt + datetime.timedelta(
         seconds=play["expected_duration_s"],
     )
@@ -570,6 +604,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--margin-s", type=float, default=5.0,
                    help="extra wall-clock margin on each side of the "
                         "expected playback window (default 5.0 s)")
+    p.add_argument("--clock-offset-s", type=float, default=0.0,
+                   help="clock offset between the playback machine's "
+                        "host clock (which wrote the playback log's "
+                        "timestamps) and the recording machine's host "
+                        "clock (which named the recording files), "
+                        "defined as recording_clock - playback_clock. "
+                        "Default 0 (same machine). For separate-host "
+                        "setups, run once with offset=0 and use the "
+                        "median segment_drift_s from the summary CSV "
+                        "as the offset for subsequent runs.")
     p.add_argument("--scale", default=1.0,
                    help="passed through to decode_sync_tags as scale "
                         "(default 1.0; 'intan_aux' / 'volts' etc. work)")
@@ -589,6 +633,7 @@ def main(argv: list[str] | None = None) -> int:
         calibration_path=args.calibration,
         output_dir=args.output_dir,
         margin_s=args.margin_s,
+        clock_offset_s=args.clock_offset_s,
         sample_rate_for_units=scale,
     )
 
