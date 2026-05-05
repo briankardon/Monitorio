@@ -117,7 +117,11 @@ Driver and OS-level tools (install separately, **not** via pip):
   for the random-playback session driver
   (`Source/playback/play_random.py`). The `python-vlc` Python package
   is just the bindings; the actual VLC binary needs to be installed
-  separately. Skip this if you don't use the playback driver.
+  separately. Skip this if you don't use the playback driver. Note
+  that the VLC folder that contains libvlc.dll (typically the same
+  one that contains vlc.exe) must be on the system path, and the
+  bitness of VLC (32 vs 64) must match the bitness of python
+  (probably 64 bit).
 - **Python 3.12+** -- developed against 3.14. Any 3.12+ should work.
 
 Python packages (install with `pip install -r requirements.txt` inside
